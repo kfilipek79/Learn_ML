@@ -1,0 +1,304 @@
+---
+title: "Accidents"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+### UK accidents - context
+
+The UK government amassed traffic data from 2000 and 2016, recording over 1.6 million accidents in the process and making this one of the most comprehensive traffic data sets out there. It's a huge picture of a country undergoing change.
+
+Note that all the contained accident data comes from police reports, so this data does not include minor incidents.
+Content
+
+ukTrafficAADF.csv tracks how much traffic there was on all major roads in the given time period (2000 through 2016). AADT, the core statistic included in this file, stands for "Average Annual Daily Flow", and is a measure of how activity a road segment based on how many vehicle trips traverse it. The AADT page on Wikipedia is a good reference on the subject.
+
+Accidents data is split across three CSV files: accidents_2005_to_2007.csv, accidents_2009_to_2011.csv, and accidents_2012_to_2014.csv. These three files together constitute 1.6 million traffic accidents. The total time period is 2005 through 2014, but 2008 is missing.
+
+A data dictionary for the raw dataset at large is available from the UK Department of Transport website here. For descriptions of individual columns, see the column metadata.
+
+
+### Questions
+- How has changing traffic flow impacted accidents?
+- Can we predict accident rates over time? What might improve accident rates?
+- Plot interactive maps of changing trends, e.g. How has London has changed for cyclists? Busiest roads in the nation?
+- Which areas never change and why? Identify infrastructure needs, failings and successes.
+- How have Rural and Urban areas differed (see RoadCategory)? How about the differences between England, Scotland, and Wales?
+- The UK government also like to look at miles driven. You can do this by multiplying the AADF by the corresponding length of road (link length) and by the number of days in the years. What does this tell you about UK roads?
+
+### Data structure
+```{r}
+accidents <- read.csv('accidents_2005_to_2007.csv')
+summary(accidents)
+```
+
+
+## Time statistics - different dimensions
+```{r}
+library(ggplot2)
+library(dplyr)
+### Which day is the most probable day for accident?
+barplot(table(accidents$Year, accidents$Day_of_Week))
+
+### Some fun with data for better charts
+### summarise(n = n()) counts rows in object
+Days_num <- accidents %>% 
+  group_by(Day_of_Week) %>% 
+  summarise(n = n())
+
+
+ggplot(Days_num, aes(Day_of_Week, n)) +
+  geom_bar(stat = "identity") +
+  ggtitle("Accidents per day") +
+  theme(axis.text.x=element_text(hjust=0.5,vjust=1))
+
+
+### within year
+Year_days_num <- accidents %>% 
+  group_by(Year, Day_of_Week) %>% 
+  summarise(n = n())
+
+days <- c("monday","tuesday","wedensday","thursday","friday","saturday","sunday")
+
+p <- ggplot(data = Year_days_num, 
+    aes(x=Day_of_Week, y=n, color=factor(Year)))+
+    geom_point() +
+    geom_line() 
+p
+```
+
+### Question 1: How has changing traffic flow impacted accidents?
+
+- Dependent variable: accident (Accident_Severity: scale 1 to 3)
+- Independent variable(s): 
+    - traffic flow≥ Traffic flow is operationalised here as an association between 
+    
+    (Junction_Control)
+
+- Variable has four values:
+    - Giveway or uncontrolled
+    - Stop sign
+    - Authorised person
+    - Automatic traffic signal
+
+- Proposed order appears to reflect the amount of risk related to each junction. It is assumed here that for the analytical process introduction of the order varaible with proposed hierarchy might be the effective move.
+- Thus, each type of the junction has a value (weak point of analysis).
+
+
+```{r}
+#summary(accidents)
+summary(accidents$Junction_Control)
+
+
+```
+### Question 2: Can we predict accident rates over time? What might improve accident rates?
+- Possible methods to predict time-series:
+   - Regression - Using time-based features such as week, month, day, day of week, etc as predictors. You can also add in external predictors that may influence the target (e.g. weather and temperature may affect sales of umbrellas).
+   - ARIMA - Autoregressive Integrated Moving Average - Using autocorrelation (lags) as predictors
+   - GARCH - Models changing variance
+   - Time series decomposition - Splitting out trend, seasonality, etc.
+   - Others - Deep Learning, GAM-based models (prophet) - Can also be useful
+
+#### Accidents - using h2o
+```{r}
+library(lubridate)
+library(h2o)        # Awesome ML Library
+library(timetk)     # Toolkit for working with time series in R
+library(tidyquant)
+
+# step 1 - preparing data matrix
+acc <- accidents %>% 
+  group_by(Year, Date) %>% 
+  summarise(n = n())
+
+# Changing date format and order of the column
+acc$Day <- strptime(as.character(acc$Date), "%d/%m/%Y")
+acc$Date2 <- format(acc$Day, "%Y-%m-%d")
+acc$Date2 <- format(as.Date(acc$Date2,"%Y-%m-%d"),"%Y-%m-%d")    ### !!! CRITICAL FUNCTION TO SET 
+# acc$Date2
+
+### EXPOLRE COLUMN WHEN PROBLEM APPEARS!!! acc_clean$date POSIX (time zone attribute) problem has appeared.
+
+acc_c <- acc[,c(5,3)]
+colnames(acc_c)[1] <- "date"
+acc_c$date
+
+acc_c <- acc_c %>%
+  arrange(date)
+
+acc_c$date <- as.Date(acc_c$date)   ### !!! Date must be double npt character. as.Date function needed!!!
+
+acc_aug <- acc_c %>%
+  tk_augment_timeseries_signature()  ### ale tu jest problem
+
+acc_aug %>% glimpse()
+
+# Step 2
+
+acc_clean <- acc_aug %>%
+    select_if(~ !is.Date(.)) %>%
+    select_if(~ !any(is.na(.))) %>%
+    mutate_if(is.ordered, ~ as.character(.) %>% as.factor)
+
+acc_clean  %>% glimpse()
+
+### Let’s split into a training, validation and test sets following the time ranges in the visualization above.
+
+range(acc_c$date)
+
+# Split into training, validation and test sets
+train_acc <- acc_clean %>% filter(year < 2006)
+valid_acc <- acc_clean %>% filter(year == 2006)
+test_acc <- acc_clean %>% filter(year == 2007)
+
+# step 3
+## Step 3
+h2o.init()        # Fire up h2o
+h2o.no_progress() # Turn off progress bars
+
+# Convert to H2OFrame objects
+train_h2o_acc <- as.h2o(train_acc)
+valid_h2o_acc <- as.h2o(valid_acc)
+test_h2o_acc  <- as.h2o(test_acc)
+
+# Set names for h2o
+y <- "n"
+x <- setdiff(names(train_h2o_acc), y)
+
+# linear regression model used, but can use any model
+automl_models_h2o_acc <- h2o.automl(
+    x = x, 
+    y = y, 
+    training_frame = train_h2o_acc, 
+    validation_frame = valid_h2o_acc, 
+    leaderboard_frame = test_h2o_acc, 
+    max_runtime_secs = 60, 
+    stopping_metric = "deviance")
+
+# Next we extract the leader model.
+
+# Extract leader model
+automl_leader_acc <- automl_models_h2o_acc@leader
+
+# Step 4
+# Generate predictions using h2o.predict() on the test data.
+
+pred_h2o_acc <- h2o.predict(automl_leader_acc, newdata = test_h2o_acc)
+
+# Step 5 
+# There are a few ways to evaluate performance. We’ll go through the easy way, which is h2o.performance(). This yields a preset values that are commonly used to compare regression models including root mean squared error (RMSE) and mean absolute error (MAE).
+
+h2o.performance(automl_leader_acc, newdata = test_h2o_acc)
+h2o.performance(automl_leader_acc, newdata = test_h2o_acc, valid = TRUE)
+
+h2o.per
+
+# Investigate test error
+
+error_acc <- acc_c %>% 
+    filter(lubridate::year(date) == 2007) %>%
+    add_column(pred = pred_h2o_acc %>% as.tibble() %>% pull(predict)) %>%
+    rename(actual = n) %>%
+    mutate(
+        error     = actual - pred,
+        error_pct = error / actual
+        ) 
+error_acc
+
+
+# For comparison sake, we can calculate a few residuals metrics.
+
+error_acc %>%
+    summarise(
+        me   = mean(error),
+        rmse = mean(error^2)^0.5,
+        mae  = mean(abs(error)),
+        mape = mean(abs(error_pct)),
+        mpe  = mean(error_pct)
+    ) %>%
+    glimpse()
+
+```
+
+#### Visualizaing prediction
+```{r}
+# Create spooky dark theme:
+theme_spooky = function(base_size = 10, base_family = "Chiller") {
+    
+    theme_grey(base_size = base_size, base_family = base_family) %+replace%
+        
+        theme(
+            # Specify axis options
+            axis.line = element_blank(),  
+            axis.text.x = element_text(size = base_size*0.8, color = "white", lineheight = 0.9),  
+            axis.text.y = element_text(size = base_size*0.8, color = "white", lineheight = 0.9),  
+            axis.ticks = element_line(color = "white", size  =  0.2),  
+            axis.title.x = element_text(size = base_size, color = "white", margin = margin(0, 10, 0, 0)),  
+            axis.title.y = element_text(size = base_size, color = "white", angle = 90, margin = margin(0, 10, 0, 0)),  
+            axis.ticks.length = unit(0.3, "lines"),   
+            # Specify legend options
+            legend.background = element_rect(color = NA, fill = " gray10"),  
+            legend.key = element_rect(color = "white",  fill = " gray10"),  
+            legend.key.size = unit(1.2, "lines"),  
+            legend.key.height = NULL,  
+            legend.key.width = NULL,      
+            legend.text = element_text(size = base_size*0.8, color = "white"),  
+            legend.title = element_text(size = base_size*0.8, face = "bold", hjust = 0, color = "white"),  
+            legend.position = "none",  
+            legend.text.align = NULL,  
+            legend.title.align = NULL,  
+            legend.direction = "vertical",  
+            legend.box = NULL, 
+            # Specify panel options
+            panel.background = element_rect(fill = " gray10", color  =  NA),  
+            #panel.border = element_rect(fill = NA, color = "white"),  
+            panel.border = element_blank(),
+            panel.grid.major = element_line(color = "grey35"),  
+            panel.grid.minor = element_line(color = "grey20"),  
+            panel.spacing = unit(0.5, "lines"),   
+            # Specify facetting options
+            strip.background = element_rect(fill = "grey30", color = "grey10"),  
+            strip.text.x = element_text(size = base_size*0.8, color = "white"),  
+            strip.text.y = element_text(size = base_size*0.8, color = "white",angle = -90),  
+            # Specify plot options
+            plot.background = element_rect(color = " gray10", fill = " gray10"),  
+            plot.title = element_text(size = base_size*1.2, color = "white",hjust=0,lineheight=1.25,
+                                      margin=margin(2,2,2,2)),  
+            plot.subtitle = element_text(size = base_size*1, color = "white",hjust=0,  margin=margin(2,2,2,2)),  
+            plot.caption = element_text(size = base_size*0.8, color = "white",hjust=0),  
+            plot.margin = unit(rep(1, 4), "lines")
+            
+        )
+    
+}
+```
+
+#### MAPE prediction
+```{r}
+acc_c %>%
+    ggplot(aes(x = date, y = n)) +
+    # Data - Spooky Orange
+    geom_point(size = 2, color = "gray", alpha = 0.5, shape = 21, fill = "orange") +
+    geom_line(color = "orange", size = 0.5) +
+    geom_ma(n = 12, color = "white") +
+    # Predictions - Spooky Purple
+    geom_point(aes(y = pred), size = 2, color = "gray", alpha = 1, shape = 21, fill = "purple", data = error_acc) +
+    geom_line(aes(y = pred), color = "purple", size = 0.5, data = error_acc) +
+    # Aesthetics
+    theme_spooky(base_size = 20) +
+    labs(
+        title = "Accident Rate Forecast",
+        subtitle = "H2O had highest accuracy, MAPE = 10.1%",
+        caption = "Thanks to H2O!"
+    )
+
+```
+
+### Predciting type of accident from different variables
+- starting  a new chunk - test
+```{r}
+
+```
+
